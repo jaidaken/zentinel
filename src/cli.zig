@@ -172,7 +172,7 @@ fn readResolvedConfig(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, path:
 /// Run `zig version` and classify the result. Any failure to obtain a version
 /// (executable missing, non-zero exit, empty output) is reported as not found.
 fn discoverZig(gpa: std.mem.Allocator, io: std.Io) zentinel.zig_version.Discovery {
-    const result = std.process.run(gpa, io, .{
+    const result = zentinel.exec.run(gpa, io, .{
         .argv = &.{ "zig", "version" },
         .timeout = .{ .duration = .{ .raw = std.Io.Duration.fromMilliseconds(5000), .clock = .awake } },
     }) catch return .not_found;
@@ -228,7 +228,7 @@ fn elapsedMs(io: std.Io, start_ms: i64) u64 {
 
 fn execProcess(rt: *RunCtx, argv: []const []const u8, cwd: std.process.Child.Cwd) zentinel.runner.RawOutcome {
     const start_ms = std.Io.Timestamp.now(rt.io, .real).toMilliseconds();
-    const result = std.process.run(rt.gpa, rt.io, .{
+    const result = zentinel.exec.run(rt.gpa, rt.io, .{
         .argv = argv,
         .cwd = cwd,
         .stdout_limit = run_output_limit,
@@ -502,8 +502,8 @@ fn buildObservation(gpa: std.mem.Allocator, io: std.Io, cfg_bytes: []const u8, z
 
 fn timeoutFromMs(ms: i64) std.Io.Timeout {
     if (ms <= 0) return .none;
-    // `.awake` is the monotonic clock that excludes suspend time: the right
-    // basis for a wall-bounded test timeout.
+    // `.awake` excludes suspend time; `exec.run` resolves this duration to an
+    // absolute deadline once, so it bounds wall time and not per-read idle time.
     return .{ .duration = .{ .raw = std.Io.Duration.fromMilliseconds(ms), .clock = .awake } };
 }
 
@@ -625,7 +625,7 @@ fn splitScopeCsv(gpa: std.mem.Allocator, csv: []const u8) ![]const []const u8 {
 /// project root so they match discovered source paths. Untracked new files are not
 /// reported by `git diff`; `--scope-files` covers that case.
 fn gitChangedFiles(gpa: std.mem.Allocator, io: std.Io, root_dir: std.Io.Dir, base: []const u8) ![]const []const u8 {
-    const result = std.process.run(gpa, io, .{
+    const result = zentinel.exec.run(gpa, io, .{
         // `--end-of-options` immediately before `base` stops git from
         // interpreting a ref that begins with `-` as an option. A trailing `--`
         // would NOT help: it only separates pathspecs that follow it, not the
@@ -1127,7 +1127,7 @@ const DoctestCtx = struct {
 fn doctestExecFn(ctx: *anyopaque, argv: []const []const u8) zentinel.runner.RawOutcome {
     const rt: *DoctestCtx = @ptrCast(@alignCast(ctx));
     const start_ms = std.Io.Timestamp.now(rt.io, .real).toMilliseconds();
-    const result = std.process.run(rt.gpa, rt.io, .{
+    const result = zentinel.exec.run(rt.gpa, rt.io, .{
         .argv = argv,
         .cwd = .{ .dir = rt.root_dir },
         .stdout_limit = run_output_limit,
@@ -1670,7 +1670,7 @@ fn doctestMutateRunFn(ctx: *anyopaque, mutated_source: []const u8) zentinel.runn
     if (std.fs.path.dirname(rel)) |parent| rt.root_dir.createDirPath(rt.io, parent) catch return crash;
     rt.root_dir.writeFile(rt.io, .{ .sub_path = rel, .data = mutated_source }) catch return crash;
     const start_ms = std.Io.Timestamp.now(rt.io, .real).toMilliseconds();
-    const result = std.process.run(rt.gpa, rt.io, .{
+    const result = zentinel.exec.run(rt.gpa, rt.io, .{
         .argv = &.{ "zig", "test", rel },
         .cwd = .{ .dir = rt.root_dir },
         .stdout_limit = run_output_limit,

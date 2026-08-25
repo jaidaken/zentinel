@@ -80,6 +80,11 @@ pub const sandbox = @import("sandbox.zig");
 /// Baseline runner: classifies test-command outcomes via an injected executor (deterministic core).
 pub const runner = @import("runner.zig");
 
+/// Wall-bounded process execution with process-group teardown (side-effect adapter).
+/// Replaces `std.process.run`, whose timeout is per-read and whose kill reaches
+/// only the direct child; see the module header.
+pub const exec = @import("exec.zig");
+
 /// Mutant runner: runs one patched mutant and classifies the result (deterministic core).
 pub const mutant_runner = @import("mutant_runner.zig");
 
