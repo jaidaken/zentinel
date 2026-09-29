@@ -195,6 +195,58 @@ test "check validates command syntax without executing the command" {
     try expectEqual(@as(u8, 0), r.exit_code);
 }
 
+// --- Workspace siblings are probed, never assumed ---------------------------
+
+const siblings_cfg =
+    \\[project]
+    \\name = "server"
+    \\workspace_siblings = ["../core", "../contracts"]
+    \\[test]
+    \\commands = ["zig build test"]
+;
+
+const ProbeMock = struct {
+    present: []const []const u8,
+    asked: usize = 0,
+
+    fn exists(ctx: *anyopaque, path: []const u8) bool {
+        const self: *ProbeMock = @ptrCast(@alignCast(ctx));
+        self.asked += 1;
+        for (self.present) |p| if (std.mem.eql(u8, p, path)) return true;
+        return false;
+    }
+    fn probe(self: *ProbeMock) check.SiblingProbe {
+        return .{ .ctx = self, .existsFn = ProbeMock.exists };
+    }
+};
+
+test "check fails when a configured workspace sibling is not beside the project root" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var mock = ProbeMock{ .present = &.{"../core"} };
+    const r = try check.run(arena.allocator(), .{ .config_source = siblings_cfg, .config_path = "zentinel.toml", .zig = ok_zig, .sibling_probe = mock.probe() });
+    try expectEqual(@as(u8, 2), r.exit_code);
+    try expectEqualStrings("ZNTL_CONFIG_INVALID_VALUE", r.code);
+    try expect(std.mem.indexOf(u8, r.message, "../contracts") != null);
+    try expectEqual(@as(usize, 2), mock.asked);
+}
+
+test "check passes when every configured workspace sibling is present" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var mock = ProbeMock{ .present = &.{ "../core", "../contracts" } };
+    const r = try check.run(arena.allocator(), .{ .config_source = siblings_cfg, .config_path = "zentinel.toml", .zig = ok_zig, .sibling_probe = mock.probe() });
+    try expectEqual(@as(u8, 0), r.exit_code);
+    try expectEqual(@as(usize, 2), mock.asked);
+}
+
+test "check without a sibling probe validates the config shape only" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const r = try runCheck(arena.allocator(), siblings_cfg, ok_zig);
+    try expectEqual(@as(u8, 0), r.exit_code);
+}
+
 // --- Global option routing (src/root.zig route) ----------------------------
 
 test "route sends check to the check handler with the default config path" {

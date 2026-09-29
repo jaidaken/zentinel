@@ -37,10 +37,27 @@ pub fn run(
         },
         .check => |globals| {
             const resolved = (try configPathOrReject(gpa, io, dir, globals, stderr)) orelse return 2;
+            const source = readResolvedConfig(gpa, io, dir, resolved);
+            // The sibling probe answers from the EFFECTIVE project root, which the
+            // config itself names; an unparsable config gets no probe and the check
+            // reports the parse failure instead.
+            var probe_roots: ?EffectiveProjectRoot = null;
+            defer if (probe_roots) |*r| r.close(io);
+            var fs_probe: SiblingFsProbe = .{ .io = io, .root_dir = undefined };
+            var probe: ?zentinel.check_command.SiblingProbe = null;
+            if (source) |bytes| {
+                var pdiag: zentinel.config.Diagnostic = .{};
+                if (zentinel.config.load(gpa, bytes, &pdiag)) |pcfg| {
+                    probe_roots = (try openEffectiveProjectRoot(io, dir, globals.root, pcfg.project_root, stderr)) orelse return 2;
+                    fs_probe.root_dir = probe_roots.?.dir();
+                    probe = .{ .ctx = &fs_probe, .existsFn = SiblingFsProbe.exists };
+                } else |_| {}
+            }
             const result = try zentinel.check_command.run(gpa, .{
-                .config_source = readResolvedConfig(gpa, io, dir, resolved),
+                .config_source = source,
                 .config_path = resolved,
                 .zig = discoverZig(gpa, io),
+                .sibling_probe = probe,
             });
             if (result.stdout.len > 0) try stdout.writeAll(result.stdout);
             if (result.code.len > 0) {
@@ -198,6 +215,19 @@ const jobs_hint_threshold: u64 = 50;
 /// deterministic orchestration (zentinel.run_command) stays pure; this adapter
 /// provides the process execution and per-mutant filesystem workspaces that
 /// docs/SANDBOX_SECURITY.md mandates.
+/// Filesystem-backed `check_command.SiblingProbe`: does `../name` exist beside
+/// the effective project root.
+const SiblingFsProbe = struct {
+    io: std.Io,
+    root_dir: std.Io.Dir,
+
+    fn exists(ctx: *anyopaque, path: []const u8) bool {
+        const self: *SiblingFsProbe = @ptrCast(@alignCast(ctx));
+        self.root_dir.access(self.io, path, .{}) catch return false;
+        return true;
+    }
+};
+
 const RunCtx = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -206,6 +236,8 @@ const RunCtx = struct {
     root_label: []const u8,
     run_id: []const u8,
     timeout: std.Io.Timeout,
+    /// `project.workspace_siblings`, linked beside every per-mutant workspace.
+    siblings: []const []const u8,
     /// The minimal command environment actually passed to every spawned test
     /// command (docs/SANDBOX_SECURITY.md). This is what makes the report's
     /// `environment_policy = minimal` label truthful.
@@ -297,7 +329,7 @@ const Workspace = zentinel.worker_pool.Workspace;
 /// lifecycle (creation + failure-path unwind) lives in worker_pool beside
 /// the workspace path helpers; on success the caller owns `ws.dir`/`ws.rel`.
 fn setupWorkspace(rt: *RunCtx, m: zentinel.mutant.Mutant, patched: []const u8) !Workspace {
-    return zentinel.worker_pool.createMutantWorkspace(rt.io, rt.gpa, rt.root_dir, rt.run_id, m.id, m.file, patched, &rt.cleanup_failures);
+    return zentinel.worker_pool.createMutantWorkspace(rt.io, rt.gpa, rt.root_dir, rt.run_id, m.id, m.file, patched, &rt.cleanup_failures, rt.siblings);
 }
 
 /// Number of times to attempt the per-mutant workspace copy before giving up.
@@ -788,9 +820,18 @@ fn runRun(
     // unscoped (today's behavior, byte-for-byte).
     if (try resolveScopeFiles(gpa, io, root_dir, &options, files.items, stderr)) |code| return code;
 
+    // A sibling that is not there makes every workspace link dangle and every
+    // mutant fail to build, which the gate reads as nothing decided; refuse first.
+    for (cfg.workspace_siblings) |entry| {
+        root_dir.access(io, entry, .{}) catch {
+            try stderr.print("error[ZNTL_CONFIG_INVALID_VALUE]: workspace sibling not found beside the project root: {s}\n", .{entry});
+            return 2;
+        };
+    }
+
     // Build the minimal command environment once; every test command this run
     // spawns is restricted to it (docs/SANDBOX_SECURITY.md).
-    var minimal_env = try zentinel.runner.minimalEnviron(gpa, parent_env);
+    var minimal_env = try zentinel.runner.minimalEnviron(gpa, parent_env, cfg.test_env_passthrough);
     defer minimal_env.deinit();
     var obs = try buildObservation(gpa, io, cfg_bytes, zig_label, "<project>");
     obs.environment_hash = try zentinel.cache.environmentHash(gpa, &minimal_env);
@@ -809,6 +850,7 @@ fn runRun(
         .root_label = "<project>",
         .run_id = obs.run_id,
         .timeout = timeoutFromMs(cfg.test_timeout_ms),
+        .siblings = cfg.workspace_siblings,
         .env = &minimal_env,
         .cleanup_failures = std.atomic.Value(u32).init(0),
     };
@@ -1580,7 +1622,7 @@ fn runDoctest(
     };
     const command = try std.fmt.allocPrint(gpa, "zentinel doctest --file {s} --format {s}", .{ doc_file, fmt_label });
 
-    var minimal_env = try zentinel.runner.minimalEnviron(gpa, parent_env);
+    var minimal_env = try zentinel.runner.minimalEnviron(gpa, parent_env, cfg.test_env_passthrough);
     defer minimal_env.deinit();
 
     var dctx = DoctestCtx{
@@ -1748,7 +1790,7 @@ fn runDoctestMutate(
         return 2;
     };
 
-    var minimal_env = try zentinel.runner.minimalEnviron(gpa, parent_env);
+    var minimal_env = try zentinel.runner.minimalEnviron(gpa, parent_env, cfg.test_env_passthrough);
     defer minimal_env.deinit();
 
     var ctx = DoctestMutateCtx{

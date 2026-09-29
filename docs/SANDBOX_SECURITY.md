@@ -76,6 +76,7 @@ Rules:
 - cleanup failures are warnings unless they risk source corruption
 - patch application validates original text before replacement
 - workspace, scratch, report, config, and documentation paths are checked with the shared project-root containment guard before filesystem access
+- a workspace is a copy of the project root alone; a build input the package reads from `..` (a `build.zig.zon` path dependency, a `b.path("../x")`) reaches it only through `project.workspace_siblings`, as a relative symlink placed in the run container beside the workspaces, never by copying the sibling and never by widening the copy to the parent tree. The sibling is read through the link; the workspace's own `.zig-cache` and `zig-out` stay inside the workspace. `check` and `run` refuse an entry that is not present beside the project root
 
 No two workers may write the same local cache, output, or temporary build artifact path. This includes `.zig-cache/`, `zig-out/`, generated doctest workspaces, and mutation runner scratch files.
 
@@ -122,7 +123,7 @@ The default minimal environment allowlist is exactly `PATH`, `HOME`, `TMPDIR`, `
 
 This is implemented, not aspirational: the run command builds the allowlist with `runner.minimalEnviron` from the parent environment and passes it as the child `environ_map` for every baseline and mutant test command (`src/cli.zig`). Because the executor actually restricts the environment to this allowlist, the `environment_policy = "minimal"` recorded in each command result is truthful — the full developer environment is not inherited. Phase 1 still cannot apply OS-level sandboxing (process isolation, filesystem jails); the minimal environment is the environment guarantee it does make.
 
-Future config may allow explicit environment variables, but default behavior should be conservative.
+`test.env_passthrough` (docs/CONFIG_SPEC.md) names further parent variables to copy, by name only: a project whose suite needs a database connection string declares its NAME there, and `runner.minimalEnviron` copies it exactly as it copies the allowlist (present in the parent: copied; absent: omitted; `ZIG_LOCAL_CACHE_DIR` never overridden). The default stays the bare allowlist, and every copied value enters the report's `environment_hash`, so a run with a different passthrough set never shares a result-cache key with one without it.
 
 ## Output Bounds
 

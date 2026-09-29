@@ -167,6 +167,18 @@ pub fn workspaceRoot(arena: std.mem.Allocator, run_id: []const u8, mutant_id: []
     return std.fmt.allocPrint(arena, "{s}/{s}", .{ base, mutant_id });
 }
 
+/// Relative target for the link `{workspaceRunBase}/{name}` that stands in for the
+/// project's sibling `../{name}`: one `..` per run-base segment climbs back to the
+/// project root, one more reaches its parent. Relative, so a checkout can move.
+pub fn siblingLinkTarget(arena: std.mem.Allocator, name: []const u8) std.mem.Allocator.Error![]const u8 {
+    const base = try workspaceRunBase(arena, "run");
+    const depth = std.mem.count(u8, base, "/") + 1;
+    var out: std.ArrayList(u8) = .empty;
+    for (0..depth + 1) |_| try out.appendSlice(arena, "../");
+    try out.appendSlice(arena, name);
+    return out.toOwnedSlice(arena);
+}
+
 /// The local Zig build cache for a workspace root, nested inside the root so a
 /// worker's `zig build` / `zig test` cache cannot collide with another worker's.
 /// Wired into the runner: `runner.minimalEnviron` sets `ZIG_LOCAL_CACHE_DIR =
@@ -271,6 +283,7 @@ pub fn createMutantWorkspace(
     mutant_file: []const u8,
     patched: []const u8,
     cleanup_failures: *std.atomic.Value(u32),
+    siblings: []const []const u8,
 ) !Workspace {
     const rel = try workspaceRoot(arena, run_id, mutant_id);
     if (config.pathEscapesRoot(io, root_dir, rel)) return error.WorkspaceCreateFailed;
@@ -287,6 +300,20 @@ pub fn createMutantWorkspace(
     };
     var dir = try root_dir.openDir(io, rel, .{});
     errdefer dir.close(io);
+
+    // `project.workspace_siblings`: one link per entry in the run container, beside
+    // every workspace of the run, so `../name` resolves from inside a copy. A sibling
+    // worker may have placed it first, and the run-container deleteTree unlinks it
+    // without following it.
+    const run_base = try workspaceRunBase(arena, run_id);
+    for (siblings) |entry| {
+        const name = config.siblingName(entry) orelse return error.WorkspaceCreateFailed;
+        const link = try std.fmt.allocPrint(arena, "{s}/{s}", .{ run_base, name });
+        root_dir.symLink(io, try siblingLinkTarget(arena, name), link, .{}) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return error.WorkspaceCreateFailed,
+        };
+    }
 
     try copyProjectTree(io, arena, root_dir, dir, excludedCopyPath);
     if (config.pathEscapesRoot(io, dir, mutant_file)) return error.WorkspaceCreateFailed;

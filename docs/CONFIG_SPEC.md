@@ -56,6 +56,9 @@ root = "."
 include = ["src/**/*.zig"]
 # Paths excluded from mutation.
 exclude = [".zig-cache/**", "zig-out/**", "test/**"]
+# Siblings of the project root (`../<name>`) linked beside every per-mutant
+# workspace, for a path dependency or a build input the package reads from `..`.
+workspace_siblings = []
 
 # Zig toolchain policy.
 [zig]
@@ -87,6 +90,9 @@ enabled = [
 [test]
 # Baseline and mutation test commands (parsed to argv, no shell).
 commands = ["zig build test"]
+# Parent environment variable NAMES copied into the minimal command environment
+# on top of the fixed allowlist (a database DSN a suite needs).
+env_passthrough = []
 # Test selection: same_file_then_package, same_file, package, or all.
 selection = "same_file_then_package"
 # Per-command timeout in milliseconds.
@@ -159,6 +165,7 @@ ZNTL_CONFIG_UNKNOWN_KEY
 | `root` | string | `.` | Project root relative to config file. |
 | `include` | list(string) | `["src/**/*.zig"]` | Source files eligible for mutation. |
 | `exclude` | list(string) | `[".zig-cache/**", "zig-out/**", "test/**"]` | Paths excluded from mutation. |
+| `workspace_siblings` | list(string) | `[]` | Entries of the exact form `../<name>`: one directory or file beside the project root that the package's build reads through `..` (a `build.zig.zon` path dependency, a `b.path("../x")`). Each per-mutant workspace is a copy of the project root alone, so without this such a build fails in every workspace. zentinel links each entry beside the run's workspaces (a relative symlink, never a copy) so `../<name>` resolves from inside every copy; `zentinel check` and `zentinel run` refuse with `ZNTL_CONFIG_INVALID_VALUE` when an entry is not present beside the project root, and a link that cannot be made classifies the mutant `invalid`, never `killed`. Any other shape (`core`, `../../x`, `../x/y`, `..`, an absolute path) is rejected. |
 
 Paths are interpreted relative to project root and normalized to `/`.
 
@@ -219,6 +226,7 @@ Expansion must be deterministic and tested.
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `commands` | list(string) | `["zig build test"]` | Baseline and mutation test commands. |
+| `env_passthrough` | list(string) | `[]` | Parent environment variable NAMES copied into the minimal command environment for every baseline and mutant command, on top of the fixed allowlist in `docs/SANDBOX_SECURITY.md` (a suite that needs a database connection string). Names only: an entry that is empty or carries `=` is rejected with `ZNTL_CONFIG_INVALID_VALUE`. A named variable the parent lacks is omitted, never synthesized; `ZIG_LOCAL_CACHE_DIR` stays forced to the per-workspace cache whatever is named. The copied values are part of the report's `environment_hash`. |
 | `selection` | enum | `same_file_then_package` | Test selection strategy: one of `same_file_then_package`, `same_file`, `package`, `all`. |
 | `timeout_ms` | integer | `30000` | Per-command timeout in milliseconds, bounding the command's TOTAL wall time rather than the gap between reads of its output. On expiry the command's whole process group is terminated, so descendants (a `zig build` runner and the test binary it spawned) cannot outlive it. Must be a positive integer (`<= 0` is rejected: a value of 0 disables the timeout and would leave hung tests unbounded). |
 | `baseline_required` | bool | `true` | Reserved baseline policy flag; report v1 requires baselines to run. |
@@ -322,6 +330,8 @@ Config validation must reject:
 - output directory outside project root unless explicitly allowed by future policy
 - mutator names not defined in `MUTATOR_SPEC.md`
 - non-positive worker counts
+- a `test.env_passthrough` entry that is empty or carries `=`
+- a `project.workspace_siblings` entry that is not exactly `../<name>`
 
 The CLI `--output <path>` override inherits this same project-root restriction as `report.output_dir`; CLI and config output paths must not diverge on sandbox boundary behavior.
 

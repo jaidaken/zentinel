@@ -244,7 +244,7 @@ test "createMutantWorkspace unwinds the partial workspace dir when setup fails m
     // already materialized .zig-cache/zentinel/workspaces/{run_id}/{mutant_id}. The
     // failure-path errdefer must remove that partial dir; previously only the fd was
     // closed, orphaning it (and the caller's success-only cleanup defer never fired).
-    const result = wp.createMutantWorkspace(io, a, tmp.dir, run_id, mutant_id, "../escape.zig", "x", &cleanup_failures);
+    const result = wp.createMutantWorkspace(io, a, tmp.dir, run_id, mutant_id, "../escape.zig", "x", &cleanup_failures, &.{});
     try std.testing.expectError(error.WorkspaceCreateFailed, result);
 
     // The partial per-mutant workspace leaf must NOT survive the failed setup.
@@ -252,6 +252,56 @@ test "createMutantWorkspace unwinds the partial workspace dir when setup fails m
     try expect(!fileExists(io, tmp.dir, rel));
     // The unwind deleteTree succeeded, so no cleanup failure was counted.
     try expectEqual(@as(u32, 0), cleanup_failures.load(.monotonic));
+}
+
+// --- Workspace siblings: `../name` resolves beside the per-mutant copy ------
+
+test "createMutantWorkspace links each configured sibling beside the copy so ../name resolves" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+
+    // A repo with two packages: `server` is the project root, `core` its sibling
+    // that server's build.zig.zon names as `../core`.
+    try tmp.dir.createDirPath(io, "repo/core");
+    try tmp.dir.writeFile(io, .{ .sub_path = "repo/core/build.zig", .data = "pub const core = 1;\n" });
+    try tmp.dir.createDirPath(io, "repo/server/src");
+    try tmp.dir.writeFile(io, .{ .sub_path = "repo/server/src/main.zig", .data = "pub const x = 1;\n" });
+    var root = try tmp.dir.openDir(io, "repo/server", .{ .iterate = true });
+    defer root.close(io);
+
+    var cleanup_failures = std.atomic.Value(u32).init(0);
+    const run_id = "run_s1000000000000000000";
+    const ws = try wp.createMutantWorkspace(io, a, root, run_id, "m_s1aaaaaaaaaaaaaaaaaaaaaa", "src/main.zig", "pub const x = 2;\n", &cleanup_failures, &.{"../core"});
+    defer ws.dir.close(io);
+
+    // From inside the workspace, `../core/build.zig` is the real sibling's file.
+    const through = try ws.dir.readFileAlloc(io, "../core/build.zig", a, .limited(1 << 16));
+    try expectEqualStrings("pub const core = 1;\n", through);
+    // The link sits in the run container, beside the workspace, and IS a link:
+    // nothing was copied, so a run with hundreds of mutants copies `core` zero times.
+    const link = try std.fmt.allocPrint(a, "{s}/core", .{try wp.workspaceRunBase(a, run_id)});
+    const st = try root.statFile(io, link, .{ .follow_symlinks = false });
+    try expect(st.kind == .sym_link);
+    // The target is relative and climbs exactly out of the run container to the
+    // project's parent, so the link is valid wherever the checkout lives.
+    try expectEqualStrings("../../../../../core", try wp.siblingLinkTarget(a, "core"));
+
+    // A second mutant of the same run finds the link already there and succeeds.
+    const ws2 = try wp.createMutantWorkspace(io, a, root, run_id, "m_s1bbbbbbbbbbbbbbbbbbbbbb", "src/main.zig", "pub const x = 3;\n", &cleanup_failures, &.{"../core"});
+    defer ws2.dir.close(io);
+    const through2 = try ws2.dir.readFileAlloc(io, "../core/build.zig", a, .limited(1 << 16));
+    try expectEqualStrings("pub const core = 1;\n", through2);
+
+    // One deleteTree of the run container reclaims both workspaces AND the link,
+    // and never follows the link into the real sibling.
+    try root.deleteTree(io, try wp.workspaceRunBase(a, run_id));
+    try expect(fileExists(io, tmp.dir, "repo/core/build.zig"));
+    try expect(!fileExists(io, root, link));
 }
 
 // --- Every item runs even when some fail (visible per-index propagation) ----

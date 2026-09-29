@@ -36,10 +36,16 @@ pub const env_allowlist = [_][]const u8{ "PATH", "HOME", "TMPDIR", "ZIG_GLOBAL_C
 /// local cache into one shared directory -- violating docs/PERFORMANCE_STRATEGY.md
 /// and docs/SANDBOX_SECURITY.md ("No two workers may write the same local cache").
 /// Pure: it transforms one map into a new owned map and never spawns a process.
-pub fn minimalEnviron(gpa: std.mem.Allocator, parent: *const std.process.Environ.Map) std.mem.Allocator.Error!std.process.Environ.Map {
+pub fn minimalEnviron(gpa: std.mem.Allocator, parent: *const std.process.Environ.Map, passthrough: []const []const u8) std.mem.Allocator.Error!std.process.Environ.Map {
     var out = std.process.Environ.Map.init(gpa);
     errdefer out.deinit();
     for (env_allowlist) |key| {
+        if (parent.get(key)) |value| try out.put(key, value);
+    }
+    // `test.env_passthrough`: named keys the project declares its suite needs (a
+    // database DSN). Copied exactly like the allowlist, absent keys omitted, and
+    // hashed into the report's environment_hash like everything else in this map.
+    for (passthrough) |key| {
         if (parent.get(key)) |value| try out.put(key, value);
     }
     try out.put("LC_ALL", "C");

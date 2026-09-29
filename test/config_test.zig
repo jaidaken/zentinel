@@ -414,6 +414,99 @@ test "an unknown selection strategy is still rejected" {
     try expectEqualStrings("selection", diag.key);
 }
 
+// --- test.env_passthrough and project.workspace_siblings -----------
+//
+// A DB-backed suite needs its connection string, and a package whose build.zig.zon
+// names `../core` needs that sibling beside every per-mutant workspace copy. Both
+// are opt-in config, never defaults: an omitted key leaves the minimal environment
+// and the self-contained workspace exactly as before.
+
+test "env_passthrough and workspace_siblings default to empty and parse when given" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var d0: config.Diagnostic = .{};
+    const dflt = try load(a, "", &d0);
+    try expectEqual(@as(usize, 0), dflt.test_env_passthrough.len);
+    try expectEqual(@as(usize, 0), dflt.workspace_siblings.len);
+
+    var diag: config.Diagnostic = .{};
+    const cfg = try load(a,
+        \\[project]
+        \\workspace_siblings = ["../core", "../contracts"]
+        \\
+        \\[test]
+        \\env_passthrough = ["KC_TEST_DB_URI", "KC_TEST_RLS_DB_URI"]
+        \\
+    , &diag);
+    try expectEqual(@as(usize, 2), cfg.test_env_passthrough.len);
+    try expectEqualStrings("KC_TEST_DB_URI", cfg.test_env_passthrough[0]);
+    try expectEqualStrings("KC_TEST_RLS_DB_URI", cfg.test_env_passthrough[1]);
+    try expectEqual(@as(usize, 2), cfg.workspace_siblings.len);
+    try expectEqualStrings("../core", cfg.workspace_siblings[0]);
+    try expectEqualStrings("../contracts", cfg.workspace_siblings[1]);
+}
+
+test "env_passthrough rejects an empty name and a name carrying a value" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var d1: config.Diagnostic = .{};
+    try expectError(error.Invalid, load(a, "[test]\nenv_passthrough = [\"\"]\n", &d1));
+    try expectEqual(config.Code.invalid_value, d1.code);
+    try expectEqualStrings("test", d1.section);
+    try expectEqualStrings("env_passthrough", d1.key);
+
+    // `KEY=value` is an assignment, not a name: the config names WHICH parent
+    // variables cross, never what they hold.
+    var d2: config.Diagnostic = .{};
+    try expectError(error.Invalid, load(a, "[test]\nenv_passthrough = [\"KC_TEST_DB_URI=postgres://x\"]\n", &d2));
+    try expectEqual(config.Code.invalid_value, d2.code);
+}
+
+test "workspace_siblings accepts only one-segment parent paths" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Each rejected shape would either point inside the project (no `..`, so the
+    // copy already has it), escape further than the project's parent, or name
+    // nothing at all.
+    const bad = [_][]const u8{
+        "[project]\nworkspace_siblings = [\"core\"]\n",
+        "[project]\nworkspace_siblings = [\"../../core\"]\n",
+        "[project]\nworkspace_siblings = [\"../core/src\"]\n",
+        "[project]\nworkspace_siblings = [\"..\"]\n",
+        "[project]\nworkspace_siblings = [\"../\"]\n",
+        "[project]\nworkspace_siblings = [\"/abs/core\"]\n",
+        "[project]\nworkspace_siblings = [\"../.\"]\n",
+    };
+    for (bad) |src| {
+        var diag: config.Diagnostic = .{};
+        try expectError(error.Invalid, load(a, src, &diag));
+        try expectEqual(config.Code.invalid_value, diag.code);
+        try expectEqualStrings("project", diag.section);
+        try expectEqualStrings("workspace_siblings", diag.key);
+    }
+    var ok_diag: config.Diagnostic = .{};
+    const ok = try load(a, "[project]\nworkspace_siblings = [\"../core\", \"../wire.json\"]\n", &ok_diag);
+    try expectEqual(@as(usize, 2), ok.workspace_siblings.len);
+}
+
+test "siblingName strips the parent segment and rejects everything else" {
+    try expectEqualStrings("core", config.siblingName("../core").?);
+    try expectEqualStrings("wire.json", config.siblingName("../wire.json").?);
+    try expect(config.siblingName("core") == null);
+    try expect(config.siblingName("../../core") == null);
+    try expect(config.siblingName("../core/src") == null);
+    try expect(config.siblingName("../") == null);
+    try expect(config.siblingName("..") == null);
+    try expect(config.siblingName("../..") == null);
+    try expect(config.siblingName("../.") == null);
+}
+
 // --- Symlink-safe output containment (audit F-3) ------------------
 //
 // `config.isOutsideRoot` is string-only: it rejects absolute paths and `..`

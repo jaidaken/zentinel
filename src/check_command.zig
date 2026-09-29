@@ -10,12 +10,25 @@ const config = @import("config.zig");
 const command = @import("command.zig");
 const zig_version = @import("zig_version.zig");
 
+/// Injected existence probe for `project.workspace_siblings` entries (paths
+/// relative to the project root). The adapter answers from the filesystem; tests
+/// inject a deterministic mock. Absent, the entries are shape-checked only.
+pub const SiblingProbe = struct {
+    ctx: *anyopaque,
+    existsFn: *const fn (ctx: *anyopaque, path: []const u8) bool,
+
+    pub fn exists(self: SiblingProbe, path: []const u8) bool {
+        return self.existsFn(self.ctx, path);
+    }
+};
+
 pub const Input = struct {
     /// Bytes of the resolved config file, or null when it does not exist.
     config_source: ?[]const u8,
     /// Resolved config path, used only for diagnostics.
     config_path: []const u8,
     zig: zig_version.Discovery,
+    sibling_probe: ?SiblingProbe = null,
 };
 
 pub const Result = struct {
@@ -76,6 +89,16 @@ pub fn run(arena: std.mem.Allocator, input: Input) std.mem.Allocator.Error!Resul
                 const msg = try std.fmt.allocPrint(arena, "invalid test command syntax ({s}): {s}", .{ @tagName(reason), c });
                 return fail(config.Code.invalid_command.token(), msg);
             },
+        }
+    }
+
+    // 6. Every configured workspace sibling must exist beside the project root,
+    //    or each mutant's workspace links to nothing and every build fails there.
+    if (input.sibling_probe) |probe| {
+        for (cfg.workspace_siblings) |entry| {
+            if (!probe.exists(entry)) {
+                return fail(config.Code.invalid_value.token(), try std.fmt.allocPrint(arena, "workspace sibling not found beside the project root: {s}", .{entry}));
+            }
         }
     }
 

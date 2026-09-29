@@ -326,7 +326,7 @@ test "minimalEnviron restricts the command environment to the documented allowli
     try parent.put("LANG", "en_US.UTF-8");
     try parent.put("ZNTL_SECRET", "leak");
 
-    var minimal = try runner.minimalEnviron(a, &parent);
+    var minimal = try runner.minimalEnviron(a, &parent, &.{});
     defer minimal.deinit();
 
     // Allowlisted keys present in the parent are copied through unchanged.
@@ -365,10 +365,40 @@ test "minimalEnviron forces a cwd-relative ZIG_LOCAL_CACHE_DIR, overriding a hos
     // working directory (= its per-mutant workspace) owns its `.zig-cache`.
     try parent.put("ZIG_LOCAL_CACHE_DIR", "/tmp/shared-zig-cache");
 
-    var minimal = try runner.minimalEnviron(a, &parent);
+    var minimal = try runner.minimalEnviron(a, &parent, &.{});
     defer minimal.deinit();
 
     // Overridden to the cwd-relative cache, NOT the forwarded host absolute value.
     try expectEqualStrings("./.zig-cache", minimal.get("ZIG_LOCAL_CACHE_DIR").?);
     try expect(!std.mem.eql(u8, minimal.get("ZIG_LOCAL_CACHE_DIR").?, "/tmp/shared-zig-cache"));
+}
+
+test "minimalEnviron copies exactly the configured passthrough keys that the parent holds" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var parent = std.process.Environ.Map.init(a);
+    defer parent.deinit();
+    try parent.put("PATH", "/usr/bin");
+    try parent.put("KC_TEST_DB_URI", "postgresql://kc@127.0.0.1:5/kitcrew");
+    try parent.put("ZNTL_SECRET", "leak");
+
+    // A named key present in the parent crosses with its value; a named key the
+    // parent lacks is omitted, never synthesized; an unnamed key stays out.
+    var minimal = try runner.minimalEnviron(a, &parent, &.{ "KC_TEST_DB_URI", "KC_TEST_RLS_DB_URI" });
+    defer minimal.deinit();
+    try expectEqualStrings("postgresql://kc@127.0.0.1:5/kitcrew", minimal.get("KC_TEST_DB_URI").?);
+    try expect(minimal.get("KC_TEST_RLS_DB_URI") == null);
+    try expect(minimal.get("ZNTL_SECRET") == null);
+    // PATH, LC_ALL, LANG, ZIG_LOCAL_CACHE_DIR, KC_TEST_DB_URI: nothing else.
+    try expectEqual(@as(usize, 5), minimal.keys().len);
+
+    // A passthrough name cannot override the forced per-workspace cache.
+    var parent2 = std.process.Environ.Map.init(a);
+    defer parent2.deinit();
+    try parent2.put("ZIG_LOCAL_CACHE_DIR", "/tmp/shared-zig-cache");
+    var minimal2 = try runner.minimalEnviron(a, &parent2, &.{"ZIG_LOCAL_CACHE_DIR"});
+    defer minimal2.deinit();
+    try expectEqualStrings("./.zig-cache", minimal2.get("ZIG_LOCAL_CACHE_DIR").?);
 }

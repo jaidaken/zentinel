@@ -42,12 +42,18 @@ pub const Config = struct {
     project_root: []const u8,
     include: []const []const u8,
     exclude: []const []const u8,
+    /// `../name` entries linked beside every per-mutant workspace copy, so a path
+    /// dependency or a `b.path("../x")` the package's build reads resolves there.
+    workspace_siblings: []const []const u8,
     zig_version: []const u8,
     zig_modes: []const []const u8,
     backend_default: []const u8,
     backend_experimental: []const []const u8,
     mutators_enabled: []const []const u8,
     test_commands: []const []const u8,
+    /// Parent environment variable NAMES copied into the minimal command
+    /// environment on top of the fixed allowlist (a DB-backed suite's DSN).
+    test_env_passthrough: []const []const u8,
     test_selection: []const u8,
     test_timeout_ms: i64,
     baseline_required: bool,
@@ -110,12 +116,14 @@ const known_keys = [_]KnownKey{
     .{ .section = "project", .key = "root" },
     .{ .section = "project", .key = "include" },
     .{ .section = "project", .key = "exclude" },
+    .{ .section = "project", .key = "workspace_siblings" },
     .{ .section = "zig", .key = "version" },
     .{ .section = "zig", .key = "modes" },
     .{ .section = "backend", .key = "default" },
     .{ .section = "backend", .key = "experimental" },
     .{ .section = "mutators", .key = "enabled" },
     .{ .section = "test", .key = "commands" },
+    .{ .section = "test", .key = "env_passthrough" },
     .{ .section = "test", .key = "selection" },
     .{ .section = "test", .key = "timeout_ms" },
     .{ .section = "test", .key = "baseline_required" },
@@ -229,6 +237,18 @@ fn outsideRoot(path: []const u8) bool {
 /// `zentinel check` to validate include/exclude paths (docs/CONFIG_SPEC.md).
 pub fn isOutsideRoot(path: []const u8) bool {
     return outsideRoot(path);
+}
+
+/// The bare name of a `project.workspace_siblings` entry, or null when the entry
+/// is not exactly `../<one segment>`. One parent level only: the link is placed
+/// beside the workspace copy, which sits one level below where `..` lands.
+pub fn siblingName(entry: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, entry, "../")) return null;
+    const name = entry["../".len..];
+    if (name.len == 0) return null;
+    if (std.mem.indexOfAny(u8, name, "/\\") != null) return null;
+    if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return null;
+    return name;
 }
 
 /// True if writing project-relative `path` under `root_dir` would traverse a
@@ -397,6 +417,14 @@ pub fn load(arena: std.mem.Allocator, source: []const u8, diag: *Diagnostic) Err
     for (test_commands) |c| {
         if (c.len == 0) return fail(diag, .invalid_value, "test", "commands", "test command must not be empty");
     }
+    const test_env_passthrough = try look.getArray("test", "env_passthrough", &.{}, diag);
+    for (test_env_passthrough) |name| {
+        // A name, never an assignment: the config says WHICH parent variables cross,
+        // and the parent holds their values.
+        if (name.len == 0 or std.mem.indexOfScalar(u8, name, '=') != null) {
+            return fail(diag, .invalid_value, "test", "env_passthrough", "each entry is an environment variable NAME (non-empty, no '=')");
+        }
+    }
     const test_selection = try look.getString("test", "selection", "same_file_then_package", diag);
     // `impact_graph` is rejected here (reserved / not-yet-implemented): its
     // resolver is currently an exact alias of same_file_then_package, so accepting
@@ -454,17 +482,26 @@ pub fn load(arena: std.mem.Allocator, source: []const u8, diag: *Diagnostic) Err
     const include = try look.getArray("project", "include", &.{"src/**/*.zig"}, diag);
     if (include.len == 0) return fail(diag, .invalid_value, "project", "include", "include must not be empty");
 
+    const workspace_siblings = try normalizePaths(arena, try look.getArray("project", "workspace_siblings", &.{}, diag));
+    for (workspace_siblings) |entry| {
+        if (siblingName(entry) == null) {
+            return fail(diag, .invalid_value, "project", "workspace_siblings", "each entry is exactly `../<name>`: one directory or file beside the project root");
+        }
+    }
+
     return Config{
         .project_name = try look.getString("project", "name", "example", diag),
         .project_root = project_root,
         .include = try normalizePaths(arena, include),
         .exclude = try normalizePaths(arena, try look.getArray("project", "exclude", &default_exclude, diag)),
+        .workspace_siblings = workspace_siblings,
         .zig_version = zig_version,
         .zig_modes = zig_modes,
         .backend_default = backend_default,
         .backend_experimental = backend_experimental,
         .mutators_enabled = mutators_enabled,
         .test_commands = test_commands,
+        .test_env_passthrough = test_env_passthrough,
         .test_selection = test_selection,
         .test_timeout_ms = test_timeout_ms,
         .baseline_required = baseline_required,
